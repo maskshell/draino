@@ -1,32 +1,23 @@
-# draino [![CI](https://github.com/maskshell/draino/actions/workflows/ci.yml/badge.svg)](https://github.com/maskshell/draino/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/maskshell/draino.svg)](https://pkg.go.dev/github.com/maskshell/draino) [![Codecov](https://img.shields.io/codecov/c/github/maskshell/draino.svg?maxAge=3600)](https://codecov.io/gh/maskshell/draino/) [![中文文档](https://img.shields.io/badge/文档-中文版-blue)](README_zh.md)
+# draino [![CI](https://github.com/maskshell/draino/actions/workflows/ci.yml/badge.svg)](https://github.com/maskshell/draino/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/maskshell/draino.svg)](https://pkg.go.dev/github.com/maskshell/draino) [![Codecov](https://img.shields.io/codecov/c/github/maskshell/draino.svg?maxAge=3600)](https://codecov.io/gh/maskshell/draino/)
 
-Draino automatically drains Kubernetes nodes based on labels and node
-conditions. Nodes that match _all_ of the supplied labels and _any_ of the
-supplied node conditions will be cordoned immediately and drained after a
-configurable `drain-buffer` time.
+Draino 基于标签和节点条件自动驱逐 Kubernetes 节点。匹配所有指定标签且满足任一节点条件的节点将被立即隔离（cordon），并在可配置的 `drain-buffer` 时间后执行驱逐（drain）。
 
-Draino is intended for use alongside the Kubernetes [Node Problem Detector](https://github.com/kubernetes/node-problem-detector)
-and [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler).
-The Node Problem Detector can set a node condition when it detects something
-wrong with a node - for instance by watching node logs or running a script. The
-Cluster Autoscaler can be configured to delete nodes that are underutilised.
-Adding Draino to the mix enables autoremediation:
+Draino 旨在配合 Kubernetes [Node Problem Detector](https://github.com/kubernetes/node-problem-detector)
+和 [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler) 使用。
+Node Problem Detector 可以在检测到节点异常时设置节点条件——例如通过监控节点日志或运行脚本。Cluster Autoscaler 可以配置为删除利用率不足的节点。
+将 Draino 加入其中可实现自动修复：
 
-1. The Node Problem Detector detects a permanent node problem and sets the
-   corresponding node condition.
-2. Draino notices the node condition. It immediately cordons the node to prevent
-   new pods being scheduled there, and schedules a drain of the node.
-3. Once the node has been drained the Cluster Autoscaler will consider it
-   underutilised. It will be eligible for scale down (i.e. termination) by the
-   Autoscaler after a configurable period of time.
+1. Node Problem Detector 检测到永久性节点问题并设置相应的节点条件。
+2. Draino 感知到节点条件后，立即隔离该节点以防止新 Pod 被调度到该节点，并调度一次节点驱逐。
+3. 节点被驱逐后，Cluster Autoscaler 会将其视为利用率不足。经过一段可配置的时间后，该节点将符合缩容（即终止）条件。
 
-## Usage
+## 用法
 
 ```bash
 docker run ghcr.io/maskshell/draino /draino --help
 ```
 
-Output:
+输出：
 
 ```text
 usage: draino [<flags>] <node-conditions>...
@@ -46,7 +37,7 @@ Flags:
       --node-label="foo=bar"     (DEPRECATED) Only nodes with this label will be eligible for cordoning and draining. May be specified multiple times.
       --node-label-expr="metadata.labels.foo == 'bar'"
                                  This is an expr string https://github.com/antonmedv/expr that must return true or false. See `nodefilters_test.go` for examples
-      --namespace="kube-system"  Namespace used to create leader election lock object. 
+      --namespace="kube-system"  Namespace used to create leader election lock object.
       --leader-election-lease-duration=15s
                                  Lease duration for leader election.
       --leader-election-renew-deadline=10s
@@ -64,63 +55,54 @@ Args:
   <node-conditions>  Nodes for which any of these conditions are true will be cordoned and drained.
 ```
 
-## Requirements
+## 环境要求
 
-* Kubernetes 1.33+ (backward compatible with 1.34 and 1.35)
-* Go 1.25+ (for building from source)
+* Kubernetes 1.33+（向后兼容 1.34 和 1.35）
+* Go 1.25+（源码构建时需要）
 
-## Building
+## 构建
 
 ```bash
 go build -o draino ./cmd/draino
 docker build -t draino:test .
 ```
 
-CI uses Go 1.25 and golangci-lint v2. See [.github/workflows/ci.yml](.github/workflows/ci.yml) for details.
+CI 使用 Go 1.25 和 golangci-lint v1.62.0。详情参见 [.github/workflows/ci.yml](.github/workflows/ci.yml)。
 
-### Labels and Label Expressions
+### 标签与标签表达式
 
-Draino allows filtering the elligible set of nodes using `--node-label` and `--node-label-expr`.
-The original flag `--node-label` is limited to the boolean AND of the specified labels. To express more complex predicates, the new `--node-label-expr`
-flag allows for mixed OR/AND/NOT logic via <https://github.com/antonmedv/expr>.
+Draino 允许使用 `--node-label` 和 `--node-label-expr` 过滤符合条件的节点集合。
+原始标志 `--node-label` 仅支持指定标签的布尔与运算。为表达更复杂的谓词，新增的 `--node-label-expr`
+标志支持通过 <https://github.com/antonmedv/expr> 实现混合 OR/AND/NOT 逻辑。
 
-An example of `--node-label-expr`:
+`--node-label-expr` 示例：
 
 ```text
 (metadata.labels.region == 'us-west-1' && metadata.labels.app == 'nginx') || (metadata.labels.region == 'us-west-2' && metadata.labels.app == 'nginx')
 ```
 
-## Considerations
+## 注意事项
 
-Keep the following in mind before deploying Draino:
+部署 Draino 前请注意以下事项：
 
-* Always run Draino in `--dry-run` mode first to ensure it would drain the nodes
-  you expect it to. In dry run mode Draino will emit logs, metrics, and events
-  but will not actually cordon or drain nodes.
-* Draino immediately cordons nodes that match its configured labels and node
-  conditions, but will wait a configurable amount of time (10 minutes by default)
-  between draining nodes. i.e. If two nodes begin exhibiting a node condition
-  simultaneously one node will be drained immediately and the other in 10 minutes.
-* Draino considers a drain to have failed if at least one pod eviction triggered
-  by that drain fails. If Draino fails to evict two of five pods it will consider
-  the Drain to have failed, but the remaining three pods will always be evicted.
-* Pods that can't be evicted by the cluster-autoscaler won't be evicted by draino.
-  See annotation `"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"` in
-  [cluster-autoscaler documentation](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-types-of-pods-can-prevent-ca-from-removing-a-node)
+* 务必先以 `--dry-run` 模式运行 Draino，确保其驱逐的节点符合预期。在 dry run 模式下，Draino 会输出日志、指标和事件，但不会实际执行隔离或驱逐操作。
+* Draino 会立即隔离匹配其配置标签和节点条件的节点，但会在节点驱逐之间等待一段可配置的时间（默认 10 分钟）。即，如果两个节点同时出现节点条件，一个节点将被立即驱逐，另一个将在 10 分钟后驱逐。
+* Draino 认为只要至少有一个 Pod 被驱逐失败，整个驱逐即视为失败。如果 Draino 未能驱逐 5 个 Pod 中的 2 个，驱逐将被标记为失败，但剩余 3 个 Pod 始终会被驱逐。
+* Cluster Autoscaler 无法驱逐的 Pod，Draino 也无法驱逐。
+  参见 [Cluster Autoscaler 文档](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-types-of-pods-can-prevent-ca-from-removing-a-node)中的注解 `"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"`。
 
-## Deployment
+## 部署
 
-Draino is automatically built from master and pushed to [GHCR](https://github.com/maskshell/draino/pkgs/container/draino).
-Builds are tagged `ghcr.io/maskshell/draino:$(git rev-parse --short HEAD)`.
+Draino 自动从 master 分支构建并推送至 [GHCR](https://github.com/maskshell/draino/pkgs/container/draino)。
+构建产物标签为 `ghcr.io/maskshell/draino:$(git rev-parse --short HEAD)`。
 
-An [example Kubernetes deployment manifest](manifest.yml) is provided.
+提供了[示例 Kubernetes 部署清单](manifest.yml)。
 
-## Monitoring
+## 监控
 
-### Metrics
+### 指标
 
-Draino provides a simple healthcheck endpoint at `/healthz` and Prometheus
-metrics (via OpenTelemetry) at `/metrics`. The following metrics exist:
+Draino 在 `/healthz` 提供健康检查端点，在 `/metrics` 提供 Prometheus 指标（通过 OpenTelemetry）。现有指标如下：
 
 ```bash
 $ kubectl -n kube-system exec -it ${DRAINO_POD} -- apk add curl
@@ -135,15 +117,15 @@ draino_drained_nodes_total{result="succeeded"} 1
 draino_drained_nodes_total{result="failed"} 1
 ```
 
-### Events
+### 事件
 
-Draino is generating event for every relevant step of the eviction process. Here is an example that ends with a reason `DrainFailed`. When everything is fine the last event for a given node will have a reason `DrainSucceeded`.
+Draino 会为驱逐过程中的每个相关步骤生成事件。以下是一个以 `DrainFailed` 结束的示例。当一切正常时，给定节点的最后一个事件的原因为 `DrainSucceeded`。
 
 ```bash
 kubectl get events -n default | grep -E '(^LAST|draino)'
 ```
 
-Output:
+输出：
 
 ```text
 LAST SEEN   FIRST SEEN   COUNT   NAME                                               KIND TYPE      REASON             SOURCE MESSAGE
@@ -154,9 +136,9 @@ LAST SEEN   FIRST SEEN   COUNT   NAME                                           
 4m          4m           1       node-demo.15fe0c48d010ecb0    Node Warning   DrainFailed        draino Draining failed: timed out waiting for evictions to complete: timed out
 ```
 
-### Conditions
+### 节点条件
 
-When a drain is scheduled, on top of the event, a condition is added to the status of the node. This condition will hold information about the beginning and the end of the drain procedure. This is something that you can see by describing the node resource:
+当驱逐被调度时，除了事件外，还会在节点状态中添加一个条件。该条件将包含驱逐过程开始和结束的信息。可以通过描述节点资源来查看：
 
 ```bash
 kubectl describe node {node-name}
@@ -177,7 +159,7 @@ Conditions:
   DrainScheduled        True    Fri, 20 Mar 2020 15:50:50 +0100   Fri, 20 Mar 2020 15:23:26 +0100   Draino                       Drain activity scheduled 2020-03-20T15:50:34+01:00
 ```
 
-Later when the drain activity will be completed the condition will be amended letting you know if it succeeded of failed:
+当驱逐活动完成后，该条件将被更新，告知你驱逐是成功还是失败：
 
 ```bash
 kubectl describe node {node-name}
@@ -198,27 +180,26 @@ Conditions:
   DrainScheduled        True    Fri, 20 Mar 2020 15:50:50 +0100   Fri, 20 Mar 2020 15:23:26 +0100   Draino                       Drain activity scheduled 2020-03-20T15:50:34+01:00 | Completed: 2020-03-20T15:50:50+01:00
   ```
 
-If the drain had failed the condition line would look like:
+如果驱逐失败，条件行将显示为：
 
 ```text
   DrainScheduled        True    Fri, 20 Mar 2020 15:50:50 +0100   Fri, 20 Mar 2020 15:23:26 +0100   Draino                       Drain activity scheduled 2020-03-20T15:50:34+01:00| Failed:2020-03-20T15:55:50+01:00
 ```
 
-## Retrying drain
+## 重试驱逐
 
-In some cases the drain activity may failed because of restrictive Pod Disruption Budget or any other reason external to Draino. The node remains `cordon` and the drain condition
-is marked as `Failed`. If you want to reschedule a drain tentative on that node, add the annotation: `draino/drain-retry: true`. A new drain schedule will be created. Note that the annotation is not modified and will trigger retries in loop in case the drain fails again.
+在某些情况下，驱逐可能因限制性 Pod Disruption Budget 或 Draino 外部的其他原因而失败。节点保持隔离状态，驱逐条件被标记为 `Failed`。如需对该节点重新调度驱逐尝试，请添加注解：`draino/drain-retry: true`。将创建新的驱逐调度计划。注意该注解不会被修改，如果驱逐再次失败将触发循环重试。
 
 ```bash
 kubectl annotate node {node-name} draino/drain-retry=true
 ```
 
-## Modes
+## 运行模式
 
-### Dry Run
+### Dry Run（试运行）
 
-Draino can be run in dry run mode using the `--dry-run` flag.
+Draino 可以使用 `--dry-run` 标志以试运行模式运行。
 
-### Cordon Only
+### 仅隔离（Cordon Only）
 
-Draino can also optionally be run in a mode where the nodes are only cordoned, and not drained. This can be achieved by using the `--skip-drain` flag.
+Draino 也可以选择以仅隔离模式运行，即只隔离节点而不执行驱逐。可通过 `--skip-drain` 标志实现。
