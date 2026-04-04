@@ -1,6 +1,11 @@
 version: "2"
 linters:
-  # Default linters are sufficient: errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
 issues:
   max-issues-per-linter: 50
   max-same-issues: 5
