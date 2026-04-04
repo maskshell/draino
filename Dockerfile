@@ -1,15 +1,20 @@
-FROM golang:1.13.15-alpine3.11 AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine3.21 AS build
 
-RUN apk update && apk add git && apk add curl
+ARG TARGETOS
+ARG TARGETARCH
 
-WORKDIR /go/src/github.com/planetlabs/draino
+RUN apk add --no-cache git
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 
-RUN go build -o /draino ./cmd/draino
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /draino ./cmd/draino
 
-FROM alpine:3.11
+FROM alpine:3.21
 
-RUN apk update && apk add ca-certificates
-RUN addgroup -S user && adduser -S user -G user
+RUN apk add --no-cache ca-certificates
+RUN addgroup -S user -g 101 && adduser -S user -u 100 -G user
 USER user
 COPY --from=build /draino /draino

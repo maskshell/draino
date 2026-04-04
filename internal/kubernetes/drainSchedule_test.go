@@ -1,7 +1,6 @@
 package kubernetes
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -13,9 +12,8 @@ import (
 )
 
 func TestDrainSchedules_Schedule(t *testing.T) {
-	fmt.Println("Now: " + time.Now().Format(time.RFC3339))
 	period := time.Minute
-	scheduler := NewDrainSchedules(&NoopCordonDrainer{}, &record.FakeRecorder{}, period, zap.NewNop())
+	scheduler := NewDrainSchedules(&NoopCordonDrainer{}, &record.FakeRecorder{}, period, zap.NewNop(), nil)
 	whenFirstSched := scheduler.(*DrainSchedules).WhenNextSchedule()
 
 	type timeWindow struct {
@@ -95,7 +93,7 @@ func (d *failDrainer) Drain(n *v1.Node) error { return errors.New("myerr") }
 // Test to ensure there are no races when calling HasSchedule while the
 // scheduler is draining a node.
 func TestDrainSchedules_HasSchedule_Polling(t *testing.T) {
-	scheduler := NewDrainSchedules(&failDrainer{}, &record.FakeRecorder{}, 0, zap.NewNop())
+	scheduler := NewDrainSchedules(&failDrainer{}, &record.FakeRecorder{}, 0, zap.NewNop(), nil)
 	node := &v1.Node{ObjectMeta: meta.ObjectMeta{Name: nodeName}}
 
 	when, err := scheduler.Schedule(node)

@@ -1,3 +1,11 @@
+{{- if not .Values.dryRun }}
+{{- if not .Values.conditions }}
+{{- fail "values.conditions is required: provide at least one node condition (e.g. ['MemoryPressure', 'Ready=False,5m'])" }}
+{{- end }}
+{{- end }}
+{{- if not .Values.image.tag }}
+{{- fail "values.image.tag is required: specify the container image tag (e.g. a commit SHA)" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,17 +40,22 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /draino
+            - --namespace={{ .Values.leaderElectionNamespace }}
           {{- if .Values.dryRun }}
             - --dry-run
-          {{ end }}
-          {{- range $key, $value := .Values.extraArgs }}
-            - --{{ $key }}{{ if $value }}={{ $value }}{{ end }}
+          {{- end }}
+          {{- range .Values.extraArgs }}
+            - {{ . }}
           {{- end }}
           {{- range .Values.conditions }}
             - {{ . }}
           {{- end }}
           livenessProbe:
             initialDelaySeconds: 30
+            httpGet:
+              path: /healthz
+              port: 10002
+          readinessProbe:
             httpGet:
               path: /healthz
               port: 10002

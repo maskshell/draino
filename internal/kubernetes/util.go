@@ -17,9 +17,11 @@ and limitations under the License.
 package kubernetes
 
 import (
+	"context"
 	"time"
 
 	core "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -53,10 +55,15 @@ func NewEventRecorder(c kubernetes.Interface) record.EventRecorder {
 }
 
 func RetryWithTimeout(f func() error, retryPeriod, timeout time.Duration) error {
-	return wait.PollImmediate(retryPeriod, timeout,
-		func() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return wait.PollUntilContextTimeout(ctx, retryPeriod, timeout, true,
+		func(ctx context.Context) (bool, error) {
 			if err := f(); err != nil {
-				return false, nil
+				if apierrors.IsConflict(err) {
+					return false, nil
+				}
+				return false, err
 			}
 			return true, nil
 		})

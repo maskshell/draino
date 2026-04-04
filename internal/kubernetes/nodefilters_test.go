@@ -31,7 +31,6 @@ import (
 func TestNodeLabelFilter(t *testing.T) {
 	cases := []struct {
 		name         string
-		logicType    string
 		obj          interface{}
 		expression   string
 		passesFilter bool
@@ -239,10 +238,10 @@ func TestOldNodeLabelFilter(t *testing.T) {
 			obj: &core.Node{
 				ObjectMeta: meta.ObjectMeta{
 					Name:   nodeName,
-					Labels: map[string]string{"planetlabs.com/cool": "very"},
+					Labels: map[string]string{"maskshell.com/cool": "very"},
 				},
 			},
-			labels:       []string{"planetlabs.com/cool=very"},
+			labels:       []string{"maskshell.com/cool=very"},
 			passesFilter: true,
 		},
 		{
@@ -348,7 +347,7 @@ func TestOldNodeLabelFilter(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			labelExpr, err := ConvertLabelsToFilterExpr(tc.labels)
+			labelExpr, _ := ConvertLabelsToFilterExpr(tc.labels)
 
 			filter, err := NewNodeLabelFilter(labelExpr, log)
 			if err != nil {
@@ -405,6 +404,7 @@ func TestParseConditions(t *testing.T) {
 		name       string
 		conditions []string
 		expect     []SuppliedCondition
+		wantErr    bool
 	}{
 		{
 			name:       "OldFormat",
@@ -424,11 +424,23 @@ func TestParseConditions(t *testing.T) {
 			conditions: []string{"Ready=Unknown,30m"},
 			expect:     []SuppliedCondition{SuppliedCondition{core.NodeConditionType("Ready"), core.ConditionStatus("Unknown"), time.Duration(30) * time.Minute}},
 		},
+		{
+			name:       "InvalidDuration",
+			conditions: []string{"Ready=True,notaduration"},
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			parsed := ParseConditions(tc.conditions)
+			parsed, err := ParseConditions(tc.conditions)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ParseConditions() error = %v, wantErr %v", err, tc.wantErr)
+				return
+			}
+			if err != nil {
+				return
+			}
 			if !reflect.DeepEqual(tc.expect, parsed) {
 				t.Errorf("expect %v, got: %v", tc.expect, parsed)
 			}
@@ -459,6 +471,21 @@ func TestConvertLabelsToFilterExpr(t *testing.T) {
 			input:    nil,
 			expected: "",
 			wantErr:  false,
+		},
+		{
+			name:    "empty key",
+			input:   []string{"=bar"},
+			wantErr: true,
+		},
+		{
+			name:    "single quote in key",
+			input:   []string{"foo'bar=baz"},
+			wantErr: true,
+		},
+		{
+			name:    "single quote in value",
+			input:   []string{"foo=bar'baz"},
+			wantErr: true,
 		},
 	}
 

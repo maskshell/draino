@@ -1,3 +1,9 @@
+# NOTE: This is an example manifest for reference. For production use,
+# prefer the Helm chart (helm/draino/) which manages naming, labels,
+# and version upgrades automatically.
+#
+# The Helm chart defaults to naming resources "<release>-draino" (via
+# _helpers.tpl), which differs from the hardcoded "draino" names below.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -20,16 +26,22 @@ rules:
   verbs: [get, watch, list, update]
 - apiGroups: ['']
   resources: [nodes/status]
-  verbs: [patch]
+  verbs: [update]
 - apiGroups: ['']
   resources: [pods]
   verbs: [get, watch, list]
 - apiGroups: ['']
   resources: [pods/eviction]
   verbs: [create]
-- apiGroups: [extensions]
+- apiGroups: [apps]
   resources: [daemonsets]
   verbs: [get, watch, list]
+- apiGroups: [apps]
+  resources: [statefulsets]
+  verbs: [get]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, patch, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -47,10 +59,8 @@ metadata:
   name: draino
   namespace: kube-system
 spec:
-  # Draino does not currently support locking/master election, so you should
-  # only run one draino at a time. Draino won't start draining nodes immediately
-  # so it's usually safe for multiple drainos to exist for a brief period of
-  # time.
+  # Draino uses leader election via a Lease resource in the configured namespace
+  # (default: kube-system). Only the leader instance processes nodes.
   replicas: 1
   selector:
     matchLabels: {component: draino}
@@ -58,14 +68,37 @@ spec:
     metadata:
       labels: {component: draino}
       name: draino
-      namespace: kube-system
     spec:
+      securityContext:
+        fsGroup: 101
+        runAsGroup: 101
+        runAsNonRoot: true
+        runAsUser: 100
       containers:
-      # You'll want to change these labels and conditions to suit your deployment.
-      - command: [/draino, --dry-run, --node-label=draino-enabled=true, BadCondition, ReallyBadCondition]
-        image: planetlabs/draino:5e07e93
-        livenessProbe:
-          httpGet: {path: /healthz, port: 10002}
-          initialDelaySeconds: 30
-        name: draino
+        # You'll want to change these labels and conditions to suit your deployment.
+        - name: draino
+          command:
+            - /draino
+            - --dry-run
+            - --node-label-expr=metadata.labels['draino-enabled'] == 'true'
+            - BadCondition
+            - ReallyBadCondition
+          image: ghcr.io/maskshell/draino:sha-<commit>
+          livenessProbe:
+            httpGet: {path: /healthz, port: 10002}
+            initialDelaySeconds: 30
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            privileged: false
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
       serviceAccountName: draino

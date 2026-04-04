@@ -2,16 +2,15 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/tag"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
-	core "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 )
@@ -37,15 +36,17 @@ type DrainSchedules struct {
 	logger        *zap.Logger
 	drainer       Drainer
 	eventRecorder record.EventRecorder
+	metrics       *Metrics
 }
 
-func NewDrainSchedules(drainer Drainer, eventRecorder record.EventRecorder, period time.Duration, logger *zap.Logger) DrainScheduler {
+func NewDrainSchedules(drainer Drainer, eventRecorder record.EventRecorder, period time.Duration, logger *zap.Logger, metrics *Metrics) DrainScheduler {
 	return &DrainSchedules{
 		schedules:     map[string]*schedule{},
 		period:        period,
 		logger:        logger,
 		drainer:       drainer,
 		eventRecorder: eventRecorder,
+		metrics:       metrics,
 	}
 }
 
@@ -129,41 +130,38 @@ func (d *DrainSchedules) newSchedule(node *v1.Node, when time.Time) *schedule {
 	}
 	sched.timer = time.AfterFunc(time.Until(when), func() {
 		log := d.logger.With(zap.String("node", node.GetName()))
-		nr := &core.ObjectReference{Kind: "Node", Name: node.GetName(), UID: types.UID(node.GetName())}
-		tags, _ := tag.New(context.Background(), tag.Upsert(TagNodeName, node.GetName())) // nolint:gosec
-		d.eventRecorder.Event(nr, core.EventTypeWarning, eventReasonDrainStarting, "Draining node")
+		nr := &v1.ObjectReference{Kind: "Node", Name: node.GetName(), UID: types.UID(node.GetName())}
+		d.eventRecorder.Event(nr, v1.EventTypeWarning, eventReasonDrainStarting, "Draining node")
 		if err := d.drainer.Drain(node); err != nil {
 			sched.finish = time.Now()
 			sched.setFailed()
 			log.Info("Failed to drain", zap.Error(err))
-			tags, _ = tag.New(tags, tag.Upsert(TagResult, tagResultFailed)) // nolint:gosec
-			stats.Record(tags, MeasureNodesDrained.M(1))
-			d.eventRecorder.Eventf(nr, core.EventTypeWarning, eventReasonDrainFailed, "Draining failed: %v", err)
-			if err := RetryWithTimeout(
+			recordMetric(context.Background(), d.metrics, func(m *Metrics) metric.Int64Counter { return m.Drained }, node.GetName(), tagResultFailed)
+			d.eventRecorder.Eventf(nr, v1.EventTypeWarning, eventReasonDrainFailed, "Draining failed: %v", err)
+			if markErr := RetryWithTimeout(
 				func() error {
 					return d.drainer.MarkDrain(node, when, sched.finish, true)
 				},
 				SetConditionRetryPeriod,
 				SetConditionTimeout,
-			); err != nil {
+			); markErr != nil {
 				log.Error("Failed to place condition following drain failure")
 			}
 			return
 		}
 		sched.finish = time.Now()
 		log.Info("Drained")
-		tags, _ = tag.New(tags, tag.Upsert(TagResult, tagResultSucceeded)) // nolint:gosec
-		stats.Record(tags, MeasureNodesDrained.M(1))
-		d.eventRecorder.Event(nr, core.EventTypeWarning, eventReasonDrainSucceeded, "Drained node")
-		if err := RetryWithTimeout(
+		recordMetric(context.Background(), d.metrics, func(m *Metrics) metric.Int64Counter { return m.Drained }, node.GetName(), tagResultSucceeded)
+		d.eventRecorder.Event(nr, v1.EventTypeNormal, eventReasonDrainSucceeded, "Drained node")
+		if markErr := RetryWithTimeout(
 			func() error {
 				return d.drainer.MarkDrain(node, when, sched.finish, false)
 			},
 			SetConditionRetryPeriod,
 			SetConditionTimeout,
-		); err != nil {
-			d.eventRecorder.Eventf(nr, core.EventTypeWarning, eventReasonDrainFailed, "Failed to place drain condition: %v", err)
-			log.Error(fmt.Sprintf("Failed to place condition following drain success : %v", err))
+		); markErr != nil {
+			d.eventRecorder.Eventf(nr, v1.EventTypeWarning, eventReasonDrainFailed, "Failed to place drain condition: %v", markErr)
+			log.Error("Failed to place condition following drain success", zap.Error(markErr))
 		}
 	})
 	return sched
@@ -173,12 +171,16 @@ type AlreadyScheduledError struct {
 	error
 }
 
+func (e *AlreadyScheduledError) Unwrap() error {
+	return e.error
+}
+
 func NewAlreadyScheduledError() error {
 	return &AlreadyScheduledError{
 		fmt.Errorf("drain schedule is already planned for that node"),
 	}
 }
 func IsAlreadyScheduledError(err error) bool {
-	_, ok := err.(*AlreadyScheduledError)
-	return ok
+	var target *AlreadyScheduledError
+	return errors.As(err, &target)
 }

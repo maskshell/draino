@@ -23,20 +23,21 @@ import (
 	"path/filepath"
 	"time"
 
-	"contrib.go.opencensus.io/exporter/prometheus"
 	"github.com/julienschmidt/httprouter"
 	"github.com/oklog/run"
-	"go.opencensus.io/stats/view"
-	"go.opencensus.io/tag"
+	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
-	"gopkg.in/alecthomas/kingpin.v2"
-	client "k8s.io/client-go/kubernetes"
+	"github.com/alecthomas/kingpin/v2"
+	kubeclient "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"github.com/planetlabs/draino/internal/kubernetes"
+	"github.com/maskshell/draino/internal/kubernetes"
 )
 
 // Default leader election settings.
@@ -82,45 +83,22 @@ func main() {
 	// this is required to make all packages using klog write to stderr instead of tmp files
 	klog.InitFlags(nil)
 
-	var (
-		nodesCordoned = &view.View{
-			Name:        "cordoned_nodes_total",
-			Measure:     kubernetes.MeasureNodesCordoned,
-			Description: "Number of nodes cordoned.",
-			Aggregation: view.Count(),
-			TagKeys:     []tag.Key{kubernetes.TagResult},
-		}
-		nodesUncordoned = &view.View{
-			Name:        "uncordoned_nodes_total",
-			Measure:     kubernetes.MeasureNodesUncordoned,
-			Description: "Number of nodes uncordoned.",
-			Aggregation: view.Count(),
-			TagKeys:     []tag.Key{kubernetes.TagResult},
-		}
-		nodesDrained = &view.View{
-			Name:        "drained_nodes_total",
-			Measure:     kubernetes.MeasureNodesDrained,
-			Description: "Number of nodes drained.",
-			Aggregation: view.Count(),
-			TagKeys:     []tag.Key{kubernetes.TagResult},
-		}
-		nodesDrainScheduled = &view.View{
-			Name:        "drain_scheduled_nodes_total",
-			Measure:     kubernetes.MeasureNodesDrainScheduled,
-			Description: "Number of nodes scheduled for drain.",
-			Aggregation: view.Count(),
-			TagKeys:     []tag.Key{kubernetes.TagResult},
-		}
-	)
+	// Set up OpenTelemetry Prometheus exporter
+	registry := prometheus.NewRegistry()
+	otelPromExporter, err := otelprom.New(otelprom.WithRegisterer(registry))
+	kingpin.FatalIfError(err, "cannot create Prometheus exporter")
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(otelPromExporter))
+	defer meterProvider.Shutdown(context.Background()) //nolint:errcheck
+	meter := meterProvider.Meter(kubernetes.Component)
 
-	kingpin.FatalIfError(view.Register(nodesCordoned, nodesUncordoned, nodesDrained, nodesDrainScheduled), "cannot create metrics")
-	p, err := prometheus.NewExporter(prometheus.Options{Namespace: kubernetes.Component})
-	kingpin.FatalIfError(err, "cannot export metrics")
-	view.RegisterExporter(p)
+	metrics, err := kubernetes.InitMetrics(meter)
+	kingpin.FatalIfError(err, "cannot create metrics")
 
 	web := &httpRunner{l: *listen, h: map[string]http.Handler{
-		"/metrics": p,
-		"/healthz": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { r.Body.Close() }), // nolint:errcheck
+		"/metrics": promhttp.HandlerFor(registry, promhttp.HandlerOpts{}),
+		"/healthz": http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}),
 	}}
 
 	log, err := zap.NewProduction()
@@ -128,7 +106,7 @@ func main() {
 		log, err = zap.NewDevelopment()
 	}
 	kingpin.FatalIfError(err, "cannot create log")
-	defer log.Sync() // nolint:errcheck
+	defer log.Sync() //nolint:errcheck
 
 	go func() {
 		log.Info("web server is running", zap.String("listen", *listen))
@@ -138,7 +116,7 @@ func main() {
 	c, err := kubernetes.BuildConfigFromFlags(*apiserver, *kubecfg)
 	kingpin.FatalIfError(err, "cannot create Kubernetes client configuration")
 
-	cs, err := client.NewForConfig(c)
+	cs, err := kubeclient.NewForConfig(c)
 	kingpin.FatalIfError(err, "cannot create Kubernetes client")
 
 	pf := []kubernetes.PodFilterFunc{kubernetes.MirrorPodFilter}
@@ -169,7 +147,8 @@ func main() {
 		kubernetes.NewEventRecorder(cs),
 		kubernetes.WithLogger(log),
 		kubernetes.WithDrainBuffer(*drainBuffer),
-		kubernetes.WithConditionsFilter(*conditions))
+		kubernetes.WithConditionsFilter(*conditions),
+		kubernetes.WithMetrics(metrics))
 
 	if *dryRun {
 		h = cache.FilteringResourceEventHandler{
@@ -179,7 +158,8 @@ func main() {
 				kubernetes.NewEventRecorder(cs),
 				kubernetes.WithLogger(log),
 				kubernetes.WithDrainBuffer(*drainBuffer),
-				kubernetes.WithConditionsFilter(*conditions)),
+				kubernetes.WithConditionsFilter(*conditions),
+				kubernetes.WithMetrics(metrics)),
 		}
 	}
 
@@ -198,12 +178,13 @@ func main() {
 
 	nodeLabelFilterFunc, err := kubernetes.NewNodeLabelFilter(nodeLabelsExpr, log)
 	if err != nil {
-		log.Sugar().Fatalf("Failed to parse node label expression: %v", err)
+		log.Fatal("Failed to parse node label expression", zap.Error(err))
 	}
 
 	nodeLabelFilter = cache.FilteringResourceEventHandler{FilterFunc: nodeLabelFilterFunc, Handler: h}
 
-	nodes := kubernetes.NewNodeWatch(cs, nodeLabelFilter)
+	nodes, err := kubernetes.NewNodeWatch(cs, nodeLabelFilter)
+	kingpin.FatalIfError(err, "cannot create node watch")
 
 	id, err := os.Hostname()
 	kingpin.FatalIfError(err, "cannot get hostname")
@@ -214,7 +195,7 @@ func main() {
 	defer cancel()
 
 	lock, err := resourcelock.New(
-		resourcelock.EndpointsResourceLock,
+		resourcelock.LeasesResourceLock,
 		*namespace,
 		*leaderElectionTokenName,
 		cs.CoreV1(),
@@ -234,7 +215,7 @@ func main() {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				log.Info("node watcher is running")
-				kingpin.FatalIfError(await(nodes), "error watching")
+				kingpin.FatalIfError(await(&informerRunner{inf: nodes}), "error watching")
 			},
 			OnStoppedLeading: func() {
 				kingpin.Fatalf("lost leader election")
@@ -244,7 +225,17 @@ func main() {
 }
 
 type runner interface {
-	Run(stop <-chan struct{})
+	Run(stop <-chan struct{}) error
+}
+
+// informerRunner adapts a cache.SharedInformer to the runner interface.
+type informerRunner struct {
+	inf cache.SharedInformer
+}
+
+func (r *informerRunner) Run(stop <-chan struct{}) error {
+	r.inf.Run(stop)
+	return nil
 }
 
 func await(rs ...runner) error {
@@ -252,7 +243,7 @@ func await(rs ...runner) error {
 	g := &run.Group{}
 	for i := range rs {
 		r := rs[i] // https://golang.org/doc/faq#closures_and_goroutines
-		g.Add(func() error { r.Run(stop); return nil }, func(err error) { close(stop) })
+		g.Add(func() error { return r.Run(stop) }, func(err error) { close(stop) })
 	}
 	return g.Run()
 }
@@ -262,18 +253,18 @@ type httpRunner struct {
 	h map[string]http.Handler
 }
 
-func (r *httpRunner) Run(stop <-chan struct{}) {
+func (r *httpRunner) Run(stop <-chan struct{}) error {
 	rt := httprouter.New()
 	for path, handler := range r.h {
 		rt.Handler("GET", path, handler)
 	}
 
 	s := &http.Server{Addr: r.l, Handler: rt}
-	ctx, cancel := context.WithTimeout(context.Background(), 0*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	go func() {
 		<-stop
-		s.Shutdown(ctx) // nolint:errcheck
+		s.Shutdown(ctx) //nolint:errcheck
 	}()
-	s.ListenAndServe() // nolint:errcheck
-	cancel()
+	return s.ListenAndServe()
 }

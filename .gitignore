@@ -4,8 +4,9 @@
 *.dll
 *.so
 *.dylib
+bin/
 
-draino
+/draino
 
 # Test binary, build with `go test -c`
 *.test
@@ -15,3 +16,18 @@ draino
 
 # Go vendor directory
 vendor/
+
+# Coverage output
+output/
+
+# Graphiti memory config (local)
+.graphiti.json
+
+# AI assistant context (local)
+.claude/
+.cursor/
+.copilot/
+.windsurfrules/
+AGENTS.md
+.agents.md
+.agent.md

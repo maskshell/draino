@@ -26,12 +26,12 @@ import (
 	core "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/antonmedv/expr"
+	"github.com/expr-lang/expr"
 )
 
 // NewNodeLabelFilter returns a filter that returns true if the supplied node satisfies the boolean expression
 func NewNodeLabelFilter(expressionStr *string, log *zap.Logger) (func(o interface{}) bool, error) {
-	//This feels wrong but this is how the previous behavior worked so I'm only keeping it to maintain compatibility.
+	// NOTE: Empty expression string matches all nodes for backward compatibility.
 
 	expression, err := expr.Compile(*expressionStr)
 	if err != nil && *expressionStr != "" {
@@ -39,7 +39,7 @@ func NewNodeLabelFilter(expressionStr *string, log *zap.Logger) (func(o interfac
 	}
 
 	return func(o interface{}) bool {
-		//This feels wrong but this is how the previous behavior worked so I'm only keeping it to maintain compatibility.
+		// NOTE: Empty expression matches all nodes (backward compatibility).
 		if *expressionStr == "" {
 			return true
 		}
@@ -59,29 +59,40 @@ func NewNodeLabelFilter(expressionStr *string, log *zap.Logger) (func(o interfac
 
 		result, err := expr.Run(expression, parameters)
 		if err != nil {
-			log.Error(fmt.Sprintf("Could not parse expression: %v", err))
+			log.Error("Could not evaluate expression", zap.Error(err))
+			return false
 		}
-		return result.(bool)
+		b, ok := result.(bool)
+		if !ok {
+			log.Error("Expression did not return a boolean")
+			return false
+		}
+		return b
 	}, nil
 }
 
-// ParseConditions can parse the string array of conditions to a list of
-// SuppliedContion to support particular status value and duration.
-func ParseConditions(conditions []string) []SuppliedCondition {
-	parsed := make([]SuppliedCondition, len(conditions))
-	for i, c := range conditions {
+// ParseConditions parses the string array of conditions to a list of
+// SuppliedCondition supporting particular status value and duration.
+// Returns an error if any condition has an invalid format.
+func ParseConditions(conditions []string) ([]SuppliedCondition, error) {
+	parsed := make([]SuppliedCondition, 0, len(conditions))
+	for _, c := range conditions {
 		ts := strings.SplitN(c, "=", 2)
 		if len(ts) != 2 {
 			// Keep backward compatibility
 			ts = []string{c, "True,0s"}
 		}
 		sm := strings.SplitN(ts[1], ",", 2)
-		duration, err := time.ParseDuration(sm[1])
-		if err == nil {
-			parsed[i] = SuppliedCondition{core.NodeConditionType(ts[0]), core.ConditionStatus(sm[0]), duration}
+		if len(sm) < 2 {
+			sm = []string{sm[0], "0s"}
 		}
+		duration, err := time.ParseDuration(sm[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid condition %q: invalid duration %q: %w", c, sm[1], err)
+		}
+		parsed = append(parsed, SuppliedCondition{core.NodeConditionType(ts[0]), core.ConditionStatus(sm[0]), duration})
 	}
-	return parsed
+	return parsed, nil
 }
 
 // NodeProcessed tracks whether nodes have been processed before using a map.
@@ -107,15 +118,24 @@ func (processed NodeProcessed) Filter(o interface{}) bool {
 	return true
 }
 
-// ConvertLabelsToFilterExpr Convert old list labels into new expression syntax
+// ConvertLabelsToFilterExpr converts old list labels into new expression syntax.
 func ConvertLabelsToFilterExpr(labelsSlice []string) (*string, error) {
 	labels := map[string]string{}
 	for _, label := range labelsSlice {
 		tokens := strings.SplitN(label, "=", 2)
+		if len(tokens) < 2 {
+			return nil, fmt.Errorf("invalid node-label format %q: expected key=value", label)
+		}
 		key := tokens[0]
 		value := tokens[1]
+		if key == "" {
+			return nil, fmt.Errorf("invalid node-label format %q: empty key", label)
+		}
+		if strings.Contains(key, "'") || strings.Contains(value, "'") {
+			return nil, fmt.Errorf("invalid node-label %q: single quotes are not allowed in keys or values", label)
+		}
 		if v, found := labels[key]; found && v != value {
-			return nil, fmt.Errorf("node-label parameter is used twice with the same key and different values: '%s' , '%s", v, value)
+			return nil, fmt.Errorf("node-label parameter is used twice with the same key and different values: '%s', '%s'", v, value)
 		}
 		labels[key] = value
 	}
@@ -128,7 +148,7 @@ func ConvertLabelsToFilterExpr(labelsSlice []string) (*string, error) {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		if k != "" && labels[k] == "" {
+		if labels[k] == "" {
 			res = append(res, fmt.Sprintf(`'%s' in metadata.labels`, k))
 		} else {
 			res = append(res, fmt.Sprintf(`metadata.labels['%s'] == '%s'`, k, labels[k]))
