@@ -1,14 +1,20 @@
 dryRun: false
 
-extraArgs: {}
+# Extra CLI arguments passed to draino binary (list of strings).
+# Example: ["--node-label-expr=metadata.labels.app == 'nginx'", "--max-grace-period=5m"]
+extraArgs: []
 
-conditions: {}
+# REQUIRED: at least one node condition (e.g. MemoryPressure, Ready=False,5m)
+conditions: []
+
+# Namespace for leader election lease resource
+leaderElectionNamespace: kube-system
 
 replicaCount: 1
 
 image:
-  repository: planetlabs/draino
-  tag: 450a853
+  repository: ghcr.io/maskshell/draino
+  tag: ""
   pullPolicy: IfNotPresent
 
 resources:
@@ -50,3 +56,7 @@ securityContext:
 containerSecurityContext:
   privileged: false
   readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL

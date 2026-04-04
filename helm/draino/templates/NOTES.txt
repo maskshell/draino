@@ -1,0 +1,12 @@
+draino is deployed!
+
+To verify:
+  kubectl get pods -l app.kubernetes.io/name={{ include "draino.name" . }} -n {{ .Release.Namespace }}
+
+To check logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "draino.name" . }} -n {{ .Release.Namespace }}
+
+Draino watches for nodes matching the configured conditions and cordons/drains them.
+{{- if .Values.dryRun }}
+  Dry-run mode is enabled (no actual cordoning or draining).
+{{- end }}
